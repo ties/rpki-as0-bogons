@@ -25,9 +25,18 @@
 import argparse
 import csv
 import json
+import logging
 import ipaddress
 
 import requests
+
+
+logging.basicConfig()
+LOG = logging.getLogger(__name__)
+LOG.setLevel(logging.INFO)
+
+
+UNASSIGNED_STATUSES = set(["available", "ianapool", "ietf", "reserved"])
 
 
 def main():
@@ -50,8 +59,19 @@ def main():
         action="store_true",
         help="Enable the use of NRO delegated stats (EXPERIMENTAL - default bogons list will not be taken in consideration)",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="verbose",
+        default=False,
+        action="store_true",
+        help="Verbose output",
+    )
 
     args = parser.parse_args()
+
+    if args.verbose:
+        LOG.setLevel(logging.DEBUG)
 
     roas = []
     if args.use_delegated_stats:
@@ -97,38 +117,39 @@ def cymru_as0_roas(url, maxLength):
 
 
 def nro_as0_roas(url):
-    delegations = requests.get(url).text.split("\n")
-    # Remove header and summaries
-    delegations.pop(0)  # 2|nro|20200214|574416|19821213|20200214|+0000
-    delegations.pop(0)  # nro|*|asn|*|91534|summary
-    delegations.pop(0)  # nro|*|ipv4|*|214428|summary
-    delegations.pop(0)  # nro|*|ipv6|*|268454|summary
-    delegations.pop()  # <last empty line on the file>
+    LOG.debug("Retrieving %s", url)
+    res = requests.get(url)
+    assert res.status_code == 200
+
+    delegations = list(csv.reader(res.text.split("\n"), delimiter="|"))
+    LOG.debug("Loaded %d delegations", len(delegations))
+    # Ignore final blank line
+    delegations.pop()
+    # Ignore the first four lines with header and  summaries
+    delegations = delegations[4:]
+    # 2|nro|20200214|574416|19821213|20200214|+0000
+    # nro|*|asn|*|91534|summary
+    # nro|*|ipv4|*|214428|summary
+    # nro|*|ipv6|*|268454|summary
 
     roas = []
+    import ipdb
 
-    for line in delegations:
-        delegation = line.split("|")
-        type = delegation[2]
-        value = delegation[3]
-        length = int(delegation[4])
-        status = delegation[6]
+    ipdb.set_trace()
 
-        if (
-            status == "available"
-            or status == "ianapool"
-            or status == "ietf"
-            or status == "reserved"
-        ):  # meaning !assigned
-            if type == "ipv4":
+    for delegation in delegations:
+        rir, country, object_type, value, length, date, status, _, _ = delegation
+        length = int(length)
+
+        if status in UNASSIGNED_STATUSES:
+            if object_type == "ipv4":
                 v4networks = ipaddress.summarize_address_range(
                     ipaddress.IPv4Address(value),
                     ipaddress.IPv4Address(value) + (length - 1),
                 )
                 roas += as0_roas_for(v4networks, 32)
-
-            if type == "ipv6":
-                v6networks = [ipaddress.IPv6Network(value + "/" + str(length))]
+            if object_type == "ipv6":
+                v6networks = [ipaddress.IPv6Network((value, length))]
                 roas += as0_roas_for(v6networks, 128)
 
     return roas
@@ -138,11 +159,9 @@ def as0_roas_for(bogons, maxLength):
     as0_roas = []
 
     for network in bogons:
-        new_entry = {}
-        new_entry["asn"] = 0
-        new_entry["prefix"] = str(network)
-        new_entry["maxPrefixLength"] = maxLength
-        as0_roas.append(new_entry)
+        as0_roas.append(
+            {"asn": 0, "prefix": str(network), "maxPrefixLength": maxLength}
+        )
 
     return as0_roas
 
