@@ -26,17 +26,16 @@ import argparse
 import csv
 import json
 import logging
-import ipaddress
 
 import requests
+
+from .nro_stats import generate_slurm
+from .roa import as0_roas_for
 
 
 logging.basicConfig()
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.INFO)
-
-
-UNASSIGNED_STATUSES = set(["available", "ianapool", "ietf", "reserved"])
 
 
 def main():
@@ -104,6 +103,7 @@ def main():
     output["locallyAddedAssertions"]["prefixAssertions"] = roas
 
     with open(args.dest_file, "w") as f:
+        LOG.info("Wrote slurm data to %s", args.dest_file)
         f.write(json.dumps(output, indent=2))
 
 
@@ -115,55 +115,11 @@ def cymru_as0_roas(url, maxLength):
 
     return as0_roas_for(bogons, maxLength)
 
-
 def nro_as0_roas(url):
     LOG.debug("Retrieving %s", url)
     res = requests.get(url)
     assert res.status_code == 200
-
-    delegations = list(csv.reader(res.text.split("\n"), delimiter="|"))
-    LOG.debug("Loaded %d delegations", len(delegations))
-    # Ignore final blank line
-    delegations.pop()
-    # Ignore the first four lines with header and  summaries
-    delegations = delegations[4:]
-    # 2|nro|20200214|574416|19821213|20200214|+0000
-    # nro|*|asn|*|91534|summary
-    # nro|*|ipv4|*|214428|summary
-    # nro|*|ipv6|*|268454|summary
-
-    roas = []
-    import ipdb
-
-    ipdb.set_trace()
-
-    for delegation in delegations:
-        rir, country, object_type, value, length, date, status, _, _ = delegation
-        length = int(length)
-
-        if status in UNASSIGNED_STATUSES:
-            if object_type == "ipv4":
-                v4networks = ipaddress.summarize_address_range(
-                    ipaddress.IPv4Address(value),
-                    ipaddress.IPv4Address(value) + (length - 1),
-                )
-                roas += as0_roas_for(v4networks, 32)
-            if object_type == "ipv6":
-                v6networks = [ipaddress.IPv6Network((value, length))]
-                roas += as0_roas_for(v6networks, 128)
-
-    return roas
-
-
-def as0_roas_for(bogons, maxLength):
-    as0_roas = []
-
-    for network in bogons:
-        as0_roas.append(
-            {"asn": 0, "prefix": str(network), "maxPrefixLength": maxLength}
-        )
-
-    return as0_roas
+    return generate_slurm(res.text)
 
 
 if __name__ == "__main__":
